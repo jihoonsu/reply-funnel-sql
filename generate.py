@@ -1,12 +1,9 @@
-"""Generate a synthetic cold-outreach dataset with two planted effects.
+"""Build funnel.db from the parameters in effects.py.
 
-Deterministic: seeded once, at the top, so the same run always produces the
-same database and the same report. That matters here for a specific reason
-— a reviewer (or an interviewer) can regenerate the exact numbers in this
-README themselves, rather than trusting a screenshot.
-
-This is the only file that imports effects.py besides the ground-truth
-test. The analysis SQL never sees it.
+Standard library only, and seeded, so the same command always produces the
+same database. Nothing here comes from a real campaign — every company, person
+and address below is invented, and all domains end in .test, a TLD reserved by
+RFC 2606 so it can never resolve to a real site.
 """
 
 import random
@@ -16,104 +13,114 @@ from pathlib import Path
 
 import effects
 
-SEED = 42
-N_COMPANIES = 40
 ROOT = Path(__file__).parent
 DB_PATH = ROOT / "funnel.db"
-SCHEMA_PATH = ROOT / "sql" / "schema.sql"
+SCHEMA = ROOT / "sql" / "schema.sql"
 
-INDUSTRIES = [
-    "Healthcare", "Manufacturing", "Logistics", "Retail",
-    "Financial Services", "Technology", "Construction", "Education",
+INDUSTRIES = ["logistics", "healthcare", "manufacturing", "retail", "finance"]
+
+COMPANY_HEAD = [
+    "Northwind", "Brightpath", "Cindershore", "Draycott", "Evermoor", "Fernwald",
+    "Glasshouse", "Harrowgate", "Ironvale", "Junipero", "Kestrelton", "Lowbridge",
+    "Marrowfield", "Norhaven", "Oakcliff", "Pemberton", "Quarrystone", "Redhollow",
 ]
-NAME_PREFIXES = [
-    "North", "Blue", "Summit", "Cedar", "Harbor", "Iron", "Silver",
-    "Bright", "Union", "Crown", "River", "Stone", "Maple", "West",
-]
-NAME_SUFFIXES = [
-    "Ridge", "Peak", "Field", "Works", "Labs", "Group", "Systems",
-    "Partners", "Logistics", "Analytics", "Solutions", "Holdings",
-]
+COMPANY_TAIL = ["Logistics", "Systems", "Holdings", "Labs", "Partners", "Group", "Supply"]
+
 FIRST_NAMES = [
-    "Alex", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Sam",
-    "Jamie", "Drew", "Cameron", "Quinn", "Avery", "Reese", "Skyler",
+    "Aisha", "Bao", "Camila", "Dmitri", "Elif", "Farhan", "Grete", "Hyun",
+    "Ines", "Jarrah", "Kofi", "Lucia", "Mateo", "Nadia", "Oskar", "Priya",
+    "Rania", "Souta", "Tomas", "Viktor", "Wren", "Yusuf", "Zofia",
 ]
 LAST_NAMES = [
-    "Kim", "Patel", "Garcia", "Nguyen", "Smith", "Johnson", "Lee",
-    "Brown", "Davis", "Martinez", "Chen", "Wilson", "Moore", "Clark",
-]
-DECISION_MAKER_TITLES = [
-    "VP of Operations", "Director of Procurement", "Chief Financial Officer",
-    "VP of Engineering", "Head of Supply Chain", "Director of IT",
-]
-IC_TITLES = [
-    "Operations Analyst", "Procurement Specialist", "Financial Analyst",
-    "Software Engineer", "Supply Chain Coordinator", "IT Support Specialist",
+    "Achterberg", "Baptiste", "Cavalcante", "Drummond", "Eberhardt", "Fontaine",
+    "Halvorsen", "Ibarra", "Jorgensen", "Kowalczyk", "Lindqvist", "Moreau",
+    "Nakagawa", "Oyelaran", "Petrosyan", "Quiroga", "Sandoval", "Thackeray",
+    "Vasquez", "Whitlock", "Yamashita", "Zielinski",
 ]
 
-TOUCHES_PER_CONTACT = 5
-DAYS_BETWEEN_TOUCHES = 4
-START_DATE = date(2026, 1, 5)
+CAMPAIGN_START = date(2026, 6, 1)
 
 
-def build_database(rng: random.Random) -> None:
-    if DB_PATH.exists():
-        DB_PATH.unlink()
+def build(db_path: Path = DB_PATH, seed: int = effects.SEED) -> dict[str, int]:
+    """Create the database and fill it. Returns row counts."""
+    rng = random.Random(seed)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA_PATH.read_text())
+    if db_path.exists():
+        db_path.unlink()
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA.read_text())
 
-    company_id = 0
-    contact_id = 0
-    send_id = 0
-
-    for _ in range(N_COMPANIES):
-        company_id += 1
-        name = f"{rng.choice(NAME_PREFIXES)} {rng.choice(NAME_SUFFIXES)}"
-        industry = rng.choice(INDUSTRIES)
-        conn.execute(
-            "INSERT INTO companies (id, name, industry) VALUES (?, ?, ?)",
-            (company_id, name, industry),
+    companies = [
+        (
+            i,
+            f"{rng.choice(COMPANY_HEAD)} {rng.choice(COMPANY_TAIL)}",
+            rng.choice(INDUSTRIES),
         )
+        for i in range(1, effects.N_COMPANIES + 1)
+    ]
+    conn.executemany("INSERT INTO companies (id, name, industry) VALUES (?, ?, ?)", companies)
 
-        for _ in range(rng.randint(2, 5)):
-            contact_id += 1
-            seniority = (
-                "decision_maker" if rng.random() < 0.30 else "individual_contributor"
-            )
-            titles = DECISION_MAKER_TITLES if seniority == "decision_maker" else IC_TITLES
-            full_name = f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}"
-            title = rng.choice(titles)
-            conn.execute(
-                "INSERT INTO contacts (id, company_id, name, title, seniority) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (contact_id, company_id, full_name, title, seniority),
-            )
+    contacts = []
+    for i in range(1, effects.N_CONTACTS + 1):
+        first = rng.choice(FIRST_NAMES)
+        last = rng.choice(LAST_NAMES)
+        seniority = (
+            "decision_maker"
+            if rng.random() < effects.DECISION_MAKER_SHARE
+            else "individual_contributor"
+        )
+        contacts.append((
+            i,
+            rng.randint(1, effects.N_COMPANIES),
+            f"{first.lower()}.{last.lower()}{i}@company{i % effects.N_COMPANIES}.test",
+            seniority,
+        ))
+    conn.executemany(
+        "INSERT INTO contacts (id, company_id, email, seniority) VALUES (?, ?, ?, ?)",
+        contacts,
+    )
 
-            for touch_number in range(1, TOUCHES_PER_CONTACT + 1):
-                send_id += 1
-                sent_at = START_DATE + timedelta(
-                    days=(touch_number - 1) * DAYS_BETWEEN_TOUCHES
+    sends = []
+    send_id = 1
+    for contact_id, _company_id, _email, seniority in contacts:
+        # How far into the sequence this contact got. Most sequences stop early,
+        # which is why later touches have fewer sends behind them.
+        n_touches = rng.choices([1, 2, 3, 4, 5], weights=[18, 24, 24, 20, 14])[0]
+        first_day = rng.randint(0, 45)
+        for touch in range(1, n_touches + 1):
+            sent_on = CAMPAIGN_START + timedelta(days=first_day + (touch - 1) * 4)
+
+            opened = 1 if rng.random() < effects.OPEN_RATE else 0
+
+            replied = 0
+            if opened:
+                # The two planted effects, and nothing else, decide this.
+                p_reply = (
+                    effects.BASE_REPLY_RATE_PER_OPEN
+                    * effects.SENIORITY_REPLY_MULTIPLIER[seniority]
+                    * effects.TOUCH_REPLY_MULTIPLIER[touch]
                 )
-                opened = rng.random() < effects.OPEN_RATE
-                replied = opened and rng.random() < effects.reply_probability(
-                    seniority, touch_number
-                )
-                conn.execute(
-                    "INSERT INTO sends "
-                    "(id, contact_id, touch_number, sent_at, opened, replied) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (send_id, contact_id, touch_number, sent_at.isoformat(),
-                     int(opened), int(replied)),
-                )
+                replied = 1 if rng.random() < p_reply else 0
+
+            sends.append((send_id, contact_id, touch, sent_on.isoformat(), opened, replied))
+            send_id += 1
+
+    conn.executemany(
+        "INSERT INTO sends (id, contact_id, touch_number, sent_on, opened, replied) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        sends,
+    )
 
     conn.commit()
+    counts = {"companies": len(companies), "contacts": len(contacts), "sends": len(sends)}
     conn.close()
-    print(
-        f"Generated {company_id} companies, {contact_id} contacts, "
-        f"{send_id} sends -> {DB_PATH}"
-    )
+    return counts
+
+
+def main() -> None:
+    for entity, n in build().items():
+        print(f"  {entity:<10} {n:>7,}")
 
 
 if __name__ == "__main__":
-    build_database(random.Random(SEED))
+    main()

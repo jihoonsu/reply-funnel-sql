@@ -1,43 +1,53 @@
-"""The ground truth the generator plants and the analysis has to recover.
+"""The answer key.
 
-This file is the answer key. `generate.py` reads it to build synthetic data.
-Nothing under `sql/` or `report.py` may import it — an analysis that knows
-the planted answer in advance proves nothing about whether the SQL actually
-finds it. `tests/test_ground_truth.py` is the only test allowed to import
-this module, because its whole job is comparing what was planted against
-what the SQL recovered.
+Everything the synthetic data "knows" is written here, and nowhere else.
+generate.py reads this module to build the data. test_recovery.py reads it to
+check the analysis found what was planted.
 
-Two effects are planted, deliberately not more. Each is small enough to
-explain in one sentence and verify in one query.
+The SQL never reads it. That separation is the point of the project: an
+analysis query that already knows the answer proves nothing about whether the
+query is right.
+
+Two effects, deliberately. More would make the data harder to reason about
+without making the argument any stronger.
 """
 
-# Baseline probability of replying, given the email was opened at all.
-BASE_REPLY_GIVEN_OPEN = 0.15
+# Everyone starts here. A 6% chance of replying once you've actually opened
+# the email is roughly what I saw on real campaigns.
+BASE_REPLY_RATE_PER_OPEN = 0.06
 
-# Effect 1: seniority. Decision-makers reply more per open than individual
-# contributors do — multiplies the base rate.
-SENIORITY_MULTIPLIER = {
-    "decision_maker": 2.2,
-    "individual_contributor": 0.7,
+# Effect 1: seniority.
+# Decision-makers reply about 3x as often as individual contributors, measured
+# per open rather than per send. Per open is the honest denominator: if one
+# group simply opens more email, a per-send rate would credit that to seniority.
+SENIORITY_REPLY_MULTIPLIER = {
+    "decision_maker": 3.0,
+    "individual_contributor": 1.0,
 }
 
-# Effect 2: touch fatigue. Reply probability per open declines with each
-# additional follow-up in the sequence.
-TOUCH_MULTIPLIER = {
-    1: 1.3,
-    2: 1.1,
-    3: 0.8,
-    4: 0.4,
-    5: 0.2,
+# Effect 2: follow-up fatigue.
+# Each additional touch in a sequence gets a worse response than the one
+# before. By touch 5 the reply rate is a small fraction of touch 1.
+TOUCH_REPLY_MULTIPLIER = {
+    1: 1.00,
+    2: 0.62,
+    3: 0.38,
+    4: 0.23,
+    5: 0.14,
 }
 
-# Open rate is constant across every group. The two effects above live
-# entirely in the reply-given-open step, not in whether the email gets
-# opened — that keeps each effect isolated to one stage of the funnel.
-OPEN_RATE = 0.45
+# Not an effect under test — just the mechanics of the funnel. Open rate is
+# flat across both groups on purpose, so the only thing separating them in the
+# reply numbers is the seniority multiplier above.
+OPEN_RATE = 0.34
 
+# Share of contacts who are decision-makers.
+DECISION_MAKER_SHARE = 0.40
 
-def reply_probability(seniority: str, touch_number: int) -> float:
-    """The planted reply-given-open probability for one send."""
-    rate = BASE_REPLY_GIVEN_OPEN * SENIORITY_MULTIPLIER[seniority] * TOUCH_MULTIPLIER[touch_number]
-    return min(rate, 0.95)
+# Sized so that even touch 5 — the smallest cell, and the one the follow-up
+# effect makes rarest — carries enough replies to measure a rate against.
+N_COMPANIES = 3000
+N_CONTACTS = 40000
+
+# Fixed so that every run produces byte-identical data.
+SEED = 20260904

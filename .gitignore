@@ -1,4 +1,6 @@
-__pycache__/
-*.pyc
+# Generated database — rebuilt by `python3 run.py`, never committed.
 funnel.db
+
+__pycache__/
+*.py[cod]
 .DS_Store

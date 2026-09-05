@@ -1,113 +1,164 @@
-"""Run the analysis queries and render a Markdown report.
+"""Render the three analyses to reports/report.md.
 
-The interpretation lines below the tables are built from the actual query
-results, not typed by hand. That's a small thing, but it's the point: the
-prose can't say something the data doesn't show, because it's generated
-from the same numbers that produced the table above it.
+Every sentence in the report is computed from the query results. None of them
+is a hand-typed string describing an effect, because a hand-typed sentence
+keeps claiming whatever it claimed on the day it was written, even after the
+data underneath it changes.
 """
 
-import sqlite3
 from pathlib import Path
 
+from db import run_query_file
+
 ROOT = Path(__file__).parent
-DB_PATH = ROOT / "funnel.db"
-REPORT_PATH = ROOT / "reports" / "report.md"
+OUT_PATH = ROOT / "reports" / "report.md"
 
-QUERIES = {
-    "funnel": (ROOT / "sql" / "analysis_1_funnel.sql").read_text(),
-    "seniority": (ROOT / "sql" / "analysis_2_seniority.sql").read_text(),
-    "touch": (ROOT / "sql" / "analysis_3_touch_fatigue.sql").read_text(),
-}
+# A cell needs this many replies behind it before the report will describe it
+# in words. Below the threshold the numbers still appear in the table, but the
+# prose says so instead of drawing a conclusion.
+MIN_REPLIES_FOR_CLAIM = 25
+
+QUERIES = [
+    ("01_funnel_overall.sql", "How far does a cold email actually get?"),
+    ("02_reply_by_seniority.sql", "Do decision-makers reply more than individual contributors?"),
+    ("03_reply_by_touch.sql", "Does a longer follow-up sequence help, or just annoy people?"),
+]
 
 
-def _rows(conn: sqlite3.Connection, sql: str) -> list[sqlite3.Row]:
-    return conn.execute(sql).fetchall()
-
-
-def render(conn: sqlite3.Connection) -> str:
-    conn.row_factory = sqlite3.Row
-
-    funnel = _rows(conn, QUERIES["funnel"])[0]
-    seniority = {row["seniority"]: row for row in _rows(conn, QUERIES["seniority"])}
-    touch = {row["touch_number"]: row for row in _rows(conn, QUERIES["touch"])}
-
-    dm = seniority["decision_maker"]
-    ic = seniority["individual_contributor"]
-    seniority_ratio = dm["reply_rate_pct"] / ic["reply_rate_pct"]
-
-    first_touch = touch[min(touch)]
-    last_touch = touch[max(touch)]
-    fatigue_ratio = first_touch["reply_rate_pct"] / last_touch["reply_rate_pct"]
-
+def markdown_table(rows: list[dict]) -> str:
+    if not rows:
+        return "_No rows returned._"
+    headers = [h for h in rows[0] if h != "ord"]
     lines = [
-        "# Cold Outreach Reply Funnel — Analysis Report",
-        "",
-        f"Generated from {funnel['total_sends']} synthetic sends "
-        f"across a deterministic dataset (seed = 42, see `generate.py`).",
-        "",
-        "## 1. Overall funnel",
-        "",
-        "| Sends | Opened | Open rate | Replied (of opened) | Reply rate |",
-        "|---|---|---|---|---|",
-        f"| {funnel['total_sends']} | {funnel['total_opened']} | "
-        f"{funnel['open_rate_pct']}% | {funnel['total_replied']} | "
-        f"{funnel['reply_rate_given_open_pct']}% |",
-        "",
-        "## 2. Reply rate by seniority",
-        "",
-        "| Seniority | Opened sends | Replies | Reply rate |",
-        "|---|---|---|---|",
-        f"| Decision-maker | {dm['opened_sends']} | {dm['replies']} | {dm['reply_rate_pct']}% |",
-        f"| Individual contributor | {ic['opened_sends']} | {ic['replies']} | {ic['reply_rate_pct']}% |",
-        "",
-        _seniority_finding(seniority_ratio, dm, ic),
-        "",
-        "## 3. Reply rate by touch number",
-        "",
-        "| Touch # | Opened sends | Replies | Reply rate |",
-        "|---|---|---|---|",
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join("---" for _ in headers) + "|",
     ]
-    for number in sorted(touch):
-        row = touch[number]
-        lines.append(
-            f"| {number} | {row['opened_sends']} | {row['replies']} | "
-            f"{row['reply_rate_pct']}% |"
-        )
-    lines += [
-        "",
-        _fatigue_finding(fatigue_ratio, first_touch, last_touch),
-        "",
-    ]
+    for row in rows:
+        lines.append("| " + " | ".join(
+            "—" if row[h] is None else str(row[h]) for h in headers
+        ) + " |")
     return "\n".join(lines)
 
 
-def _seniority_finding(ratio: float, dm, ic) -> str:
-    # Threshold, not a hand-picked adjective: only call it a "strong"
-    # effect if it clears 2x, so this line can't overstate a fluke.
-    if ratio >= 2:
-        return (
-            f"**Finding:** decision-makers replied {ratio:.1f}x more often than "
-            f"individual contributors ({dm['reply_rate_pct']}% vs {ic['reply_rate_pct']}%)."
-        )
-    return f"**Finding:** no strong seniority effect observed (ratio {ratio:.1f}x)."
+def interpret_funnel(rows: list[dict]) -> str:
+    by_stage = {r["stage"]: r for r in rows}
+    sent, opened, replied = by_stage["sent"], by_stage["opened"], by_stage["replied"]
+    return (
+        f"Of {sent['n']:,} emails sent, {opened['n']:,} were opened "
+        f"({opened['pct_of_sent']}%) and {replied['n']:,} got a reply "
+        f"({replied['pct_of_sent']}% of sends, {replied['pct_of_previous']}% of opens)."
+    )
 
 
-def _fatigue_finding(ratio: float, first, last) -> str:
-    if ratio >= 2:
+def interpret_seniority(rows: list[dict]) -> str:
+    by_group = {r["seniority"]: r for r in rows}
+    dm = by_group.get("decision_maker")
+    ic = by_group.get("individual_contributor")
+    if dm is None or ic is None:
+        return "Both seniority groups are not present in the data, so no comparison is possible."
+
+    thin = [r for r in (dm, ic) if r["replies"] < MIN_REPLIES_FOR_CLAIM]
+    if thin:
+        names = ", ".join(r["seniority"] for r in thin)
         return (
-            f"**Finding:** reply rate fell {ratio:.1f}x from touch "
-            f"{first['touch_number']} ({first['reply_rate_pct']}%) to touch "
-            f"{last['touch_number']} ({last['reply_rate_pct']}%) — later "
-            f"follow-ups are seeing sharply diminishing returns."
+            f"{names} has fewer than {MIN_REPLIES_FOR_CLAIM} replies, so this comparison "
+            f"is not reported as a finding."
         )
-    return f"**Finding:** no strong touch-fatigue effect observed (ratio {ratio:.1f}x)."
+
+    ratio = dm["reply_rate_per_open_pct"] / ic["reply_rate_per_open_pct"]
+    return (
+        f"Decision-makers replied to {dm['reply_rate_per_open_pct']}% of the emails they "
+        f"opened, against {ic['reply_rate_per_open_pct']}% for individual contributors — "
+        f"{ratio:.2f}x more often, on {dm['replies']:,} and {ic['replies']:,} replies "
+        f"respectively."
+    )
+
+
+def interpret_touch(rows: list[dict]) -> str:
+    if not rows:
+        return "No sends recorded, so follow-up performance cannot be assessed."
+
+    first = rows[0]
+    last = rows[-1]
+    reportable = [r for r in rows if r["replies"] >= MIN_REPLIES_FOR_CLAIM]
+    thin = [r for r in rows if r["replies"] < MIN_REPLIES_FOR_CLAIM]
+
+    if last not in reportable:
+        tail = (
+            f" Touch {last['touch_number']} is shown but not interpreted: "
+            f"{last['replies']} replies is below the {MIN_REPLIES_FOR_CLAIM}-reply threshold."
+        )
+        comparison_end = reportable[-1] if reportable else first
+    else:
+        tail = ""
+        comparison_end = last
+
+    if comparison_end is first:
+        return f"Only touch {first['touch_number']} clears the reporting threshold.{tail}"
+
+    ratio = comparison_end["reply_rate_per_open_pct"] / first["reply_rate_per_open_pct"]
+    drop = 100 * (1 - ratio)
+    rates = [r["reply_rate_per_open_pct"] for r in reportable]
+    monotonic = all(a > b for a, b in zip(rates, rates[1:]))
+    shape = (
+        "The decline is monotonic across every touch that clears the threshold"
+        if monotonic
+        else "The decline is not monotonic across touches"
+    )
+
+    note = ""
+    if thin:
+        note = (
+            f" {len(thin)} touch level(s) fell below the {MIN_REPLIES_FOR_CLAIM}-reply "
+            f"threshold and are shown without interpretation."
+        )
+
+    return (
+        f"Touch {first['touch_number']} replies at {first['reply_rate_per_open_pct']}% per "
+        f"open; by touch {comparison_end['touch_number']} that is "
+        f"{comparison_end['reply_rate_per_open_pct']}%, a {drop:.0f}% drop. "
+        f"{shape}.{note}{tail}"
+    )
+
+
+INTERPRETERS = {
+    "01_funnel_overall.sql": interpret_funnel,
+    "02_reply_by_seniority.sql": interpret_seniority,
+    "03_reply_by_touch.sql": interpret_touch,
+}
+
+
+def render() -> str:
+    parts = [
+        "# Reply funnel report",
+        "",
+        "Generated by `python3 run.py` from synthetic data. Every number below comes "
+        "from the queries in `sql/`, run against a database built by `generate.py` at a "
+        "fixed seed. **No real campaign data is used anywhere in this project.**",
+        "",
+        f"Sentences below are computed from the query results, not written by hand. A "
+        f"result needs at least {MIN_REPLIES_FOR_CLAIM} replies behind it before the "
+        f"report will describe it in words.",
+        "",
+    ]
+    for i, (filename, question) in enumerate(QUERIES, start=1):
+        rows = run_query_file(filename)
+        parts += [
+            f"## {i}. {question}",
+            "",
+            INTERPRETERS[filename](rows),
+            "",
+            markdown_table(rows),
+            "",
+        ]
+    return "\n".join(parts)
+
+
+def main() -> None:
+    OUT_PATH.parent.mkdir(exist_ok=True)
+    OUT_PATH.write_text(render())
+    print(f"  wrote {OUT_PATH.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
-    connection = sqlite3.connect(DB_PATH)
-    report = render(connection)
-    connection.close()
-
-    REPORT_PATH.parent.mkdir(exist_ok=True)
-    REPORT_PATH.write_text(report)
-    print(report)
+    main()

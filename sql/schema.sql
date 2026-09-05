@@ -1,33 +1,36 @@
--- Three tables. A company has contacts; a contact receives a sequence of
--- outreach touches ("sends"). Everything downstream is derived from these.
+-- Three tables. companies and contacts describe who was contacted; sends is
+-- one row per email actually sent, which is the grain every analysis needs.
+DROP TABLE IF EXISTS sends;
+DROP TABLE IF EXISTS contacts;
+DROP TABLE IF EXISTS companies;
 
 CREATE TABLE companies (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
+    id       INTEGER PRIMARY KEY,
+    name     TEXT NOT NULL,
     industry TEXT NOT NULL
 );
 
 CREATE TABLE contacts (
-    id INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY,
     company_id INTEGER NOT NULL REFERENCES companies(id),
-    name TEXT NOT NULL,
-    title TEXT NOT NULL,
-    seniority TEXT NOT NULL CHECK (seniority IN ('decision_maker', 'individual_contributor'))
+    email      TEXT NOT NULL UNIQUE,
+    seniority  TEXT NOT NULL CHECK (seniority IN ('decision_maker', 'individual_contributor'))
 );
 
--- One row per email actually sent. touch_number is which email in the
--- sequence this is (1 = first outreach, 2 = first follow-up, ...).
--- replied = 1 requires opened = 1 -- enforced by the generator, not the
--- schema, because SQLite's CHECK can't reference sibling columns portably
--- across the versions this needs to run on.
 CREATE TABLE sends (
-    id INTEGER PRIMARY KEY,
-    contact_id INTEGER NOT NULL REFERENCES contacts(id),
-    touch_number INTEGER NOT NULL,
-    sent_at TEXT NOT NULL,
-    opened INTEGER NOT NULL CHECK (opened IN (0, 1)),
-    replied INTEGER NOT NULL CHECK (replied IN (0, 1))
+    id           INTEGER PRIMARY KEY,
+    contact_id   INTEGER NOT NULL REFERENCES contacts(id),
+    touch_number INTEGER NOT NULL CHECK (touch_number BETWEEN 1 AND 5),
+    sent_on      TEXT NOT NULL,
+    -- Stored 0/1 rather than as a status column: an email can be opened and
+    -- not replied to, so these are two independent facts, not one state.
+    opened       INTEGER NOT NULL CHECK (opened IN (0, 1)),
+    replied      INTEGER NOT NULL CHECK (replied IN (0, 1)),
+    -- You cannot reply to an email you never opened. Enforcing it here means
+    -- the analysis never has to defend against it.
+    CHECK (replied = 0 OR opened = 1),
+    UNIQUE (contact_id, touch_number)
 );
 
-CREATE INDEX idx_contacts_company ON contacts(company_id);
 CREATE INDEX idx_sends_contact ON sends(contact_id);
+CREATE INDEX idx_contacts_company ON contacts(company_id);
