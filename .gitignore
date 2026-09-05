@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+funnel.db
+.DS_Store
